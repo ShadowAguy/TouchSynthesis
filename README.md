@@ -38,7 +38,7 @@ TCP on port 8347, length-prefixed JSON.
 ## Prerequisites
 
 - iOS 26+ (tested on iPhone 13 Pro, iOS 26.3)
-- DDI mounted + VPN loopback, via [LocalDevVPN](https://localdevvpn.com) or similar
+- DDI mounted + VPN loopback, via LocalDevVPN or similar
 - A pairing record from a trusted Mac (`/var/db/lockdown/` or Xcode)
 - Rust toolchain, to build the idevice FFI library
 
