@@ -30,6 +30,10 @@ targets:
           - "$(PROJECT_DIR)/TouchSynthesis/idevice"
         HEADER_SEARCH_PATHS:
           - "$(PROJECT_DIR)/TouchSynthesis/idevice"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+          - "@loader_path/Frameworks"
         OTHER_LDFLAGS:
           - "-lidevice_ffi"
           - "-lSystem"

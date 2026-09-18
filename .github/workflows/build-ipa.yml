@@ -54,7 +54,23 @@ jobs:
       - name: Build unsigned iPhoneOS app
         run: |
           rm -rf build
-          xcodebuild             -project TouchSynthesis.xcodeproj             -scheme TouchSynthesis             -configuration Release             -sdk iphoneos             -derivedDataPath "$PWD/build"             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             CODE_SIGN_IDENTITY=""             DEVELOPMENT_TEAM=""             build
+          xcodebuild \
+            -project TouchSynthesis.xcodeproj \
+            -scheme TouchSynthesis \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath "$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build
+
+      - name: Embed XCTest developer frameworks
+        run: |
+          APP="$PWD/build/Build/Products/Release-iphoneos/TouchSynthesis.app"
+          chmod +x scripts/embed-xctest.sh
+          ./scripts/embed-xctest.sh "$APP"
 
       - name: Package unsigned IPA
         run: |

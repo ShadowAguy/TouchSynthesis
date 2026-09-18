@@ -192,37 +192,66 @@ static void _installGlobalExceptionHandler(void) {
     _installNonFatalAssertionHandler();
     _installGlobalExceptionHandler();
 
-    // Try multiple XCTest.framework paths (varies by iOS version)
-    const char *paths[] = {
-        "/System/Developer/Library/Frameworks/XCTest.framework/XCTest",
-        "/System/Developer/Library/PrivateFrameworks/XCTest.framework/XCTest",
-        "/System/Library/PrivateFrameworks/XCTest.framework/XCTest",
-        "/Developer/Library/Frameworks/XCTest.framework/XCTest",
-        NULL
-    };
-
-    for (int i = 0; paths[i] != NULL; i++) {
-        sFrameworkHandle = dlopen(paths[i], RTLD_NOW);
-        if (sFrameworkHandle) {
-            NSLog(@"[TouchSynthesizer] Loaded from: %s", paths[i]);
-            break;
+    // Prefer developer frameworks embedded in our app bundle. Modern Xcode
+    // UI-test runners carry these frameworks in Frameworks/ and SideStore
+    // re-signs nested code during installation.
+    NSString *frameworksDir = NSBundle.mainBundle.privateFrameworksPath;
+    NSArray<NSString *> *embeddedPreloads = @[
+        @"XCTestCore.framework/XCTestCore",
+        @"XCTAutomationSupport.framework/XCTAutomationSupport",
+        @"XCUIAutomation.framework/XCUIAutomation",
+    ];
+    for (NSString *relative in embeddedPreloads) {
+        NSString *candidate = [frameworksDir stringByAppendingPathComponent:relative];
+        void *h = dlopen(candidate.fileSystemRepresentation, RTLD_NOW | RTLD_GLOBAL);
+        if (h) {
+            NSLog(@"[TouchSynthesizer] Preloaded embedded: %@", candidate);
+            if (!sAutomationHandle) sAutomationHandle = h;
+        } else {
+            NSLog(@"[TouchSynthesizer] Embedded preload unavailable %@: %s", candidate, dlerror());
         }
     }
 
-    if (!sFrameworkHandle) {
-        return [NSString stringWithFormat:@"Failed to load XCTest.framework: %s", dlerror()];
+    NSMutableArray<NSString *> *xctestCandidates = [NSMutableArray array];
+    if (frameworksDir.length > 0) {
+        [xctestCandidates addObject:[frameworksDir stringByAppendingPathComponent:@"XCTest.framework/XCTest"]];
+    }
+    [xctestCandidates addObjectsFromArray:@[
+        @"/System/Developer/Library/Frameworks/XCTest.framework/XCTest",
+        @"/System/Developer/Library/PrivateFrameworks/XCTest.framework/XCTest",
+        @"/System/Library/PrivateFrameworks/XCTest.framework/XCTest",
+        @"/Developer/Library/Frameworks/XCTest.framework/XCTest",
+    ]];
+
+    NSMutableArray<NSString *> *loadErrors = [NSMutableArray array];
+    for (NSString *path in xctestCandidates) {
+        sFrameworkHandle = dlopen(path.fileSystemRepresentation, RTLD_NOW | RTLD_GLOBAL);
+        if (sFrameworkHandle) {
+            NSLog(@"[TouchSynthesizer] Loaded XCTest from: %@", path);
+            break;
+        }
+        const char *err = dlerror();
+        if (err) [loadErrors addObject:[NSString stringWithFormat:@"%@ => %s", path, err]];
     }
 
-    // Also load automation support frameworks
+    if (!sFrameworkHandle) {
+        return [NSString stringWithFormat:@"Failed to load XCTest.framework. Attempts:\n%@",
+                [loadErrors componentsJoinedByString:@"\n"]];
+    }
+
+    // Also try mounted developer paths for automation support.
     const char *automationPaths[] = {
         "/System/Developer/Library/PrivateFrameworks/XCTAutomationSupport.framework/XCTAutomationSupport",
         "/System/Developer/Library/PrivateFrameworks/XCUIAutomation.framework/XCUIAutomation",
         "/System/Developer/Library/PrivateFrameworks/XCTestCore.framework/XCTestCore",
+        "/Developer/Library/PrivateFrameworks/XCTAutomationSupport.framework/XCTAutomationSupport",
+        "/Developer/Library/PrivateFrameworks/XCUIAutomation.framework/XCUIAutomation",
+        "/Developer/Library/PrivateFrameworks/XCTestCore.framework/XCTestCore",
         NULL
     };
 
     for (int i = 0; automationPaths[i] != NULL; i++) {
-        void *handle = dlopen(automationPaths[i], RTLD_NOW);
+        void *handle = dlopen(automationPaths[i], RTLD_NOW | RTLD_GLOBAL);
         if (handle) {
             NSLog(@"[TouchSynthesizer] Loaded automation: %s", automationPaths[i]);
             if (!sAutomationHandle) sAutomationHandle = handle;
