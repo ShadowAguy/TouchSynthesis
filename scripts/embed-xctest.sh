@@ -8,8 +8,9 @@ DEST="$APP/Frameworks"
 
 mkdir -p "$DEST"
 
-declare -a QUEUE=()
-declare -A SEEN=()
+QUEUE_FILE="$(mktemp)"
+SEEN_FILE="$(mktemp)"
+trap 'rm -f "$QUEUE_FILE" "$SEEN_FILE"' EXIT
 
 framework_binary() {
   local fw="$1"
@@ -22,25 +23,25 @@ copy_framework() {
   local src="$1"
   local name
   name="$(basename "$src")"
-  if [[ -n "${SEEN[$name]:-}" ]]; then return 0; fi
-  SEEN[$name]=1
+  if grep -Fqx "$name" "$SEEN_FILE" 2>/dev/null; then return 0; fi
+  printf "%s\n" "$name" >> "$SEEN_FILE"
   echo "Embedding framework: $name"
   rm -rf "$DEST/$name"
   /usr/bin/ditto "$src" "$DEST/$name"
   rm -rf "$DEST/$name/_CodeSignature" || true
-  QUEUE+=("$(framework_binary "$DEST/$name")")
+  framework_binary "$DEST/$name" >> "$QUEUE_FILE"
 }
 
 copy_dylib() {
   local src="$1"
   local name
   name="$(basename "$src")"
-  if [[ -n "${SEEN[$name]:-}" ]]; then return 0; fi
-  SEEN[$name]=1
+  if grep -Fqx "$name" "$SEEN_FILE" 2>/dev/null; then return 0; fi
+  printf "%s\n" "$name" >> "$SEEN_FILE"
   echo "Embedding dylib: $name"
   cp -f "$src" "$DEST/$name"
   chmod u+w "$DEST/$name"
-  QUEUE+=("$DEST/$name")
+  printf "%s\n" "$DEST/$name" >> "$QUEUE_FILE"
 }
 
 find_framework() {
@@ -70,9 +71,10 @@ do
 done
 
 # Walk developer-only dependencies recursively.
-idx=0
-while (( idx < ${#QUEUE[@]} )); do
-  bin="${QUEUE[$idx]}"
+idx=1
+while :; do
+  bin="$(sed -n "${idx}p" "$QUEUE_FILE")"
+  [[ -n "$bin" ]] || break
   idx=$((idx + 1))
   [[ -f "$bin" ]] || continue
   chmod u+w "$bin" || true
