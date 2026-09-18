@@ -436,56 +436,67 @@ struct ContentView: View {
             return
         }
 
-        // Step 1: Lockdown handshake
-        status = "Connecting lockdown..."
-        logger.log("Starting full handshake...", phase: "P1")
-
-        do {
-            let client = LockdownClient(pairingRecord: record)
-            try client.connect()
-            lockdownClient = client
-            logger.log("TCP connected", phase: "P1", level: .success)
-
-            let type = try client.queryType()
-            logger.log("QueryType: \(type)", phase: "P1", level: .success)
-
-            let sid = try client.startSession()
-            logger.log("Session started (ID: \(sid))", phase: "P1", level: .success)
-            logger.log("TLS active: \(client.isTLSActive)", phase: "P1",
-                       level: client.isTLSActive ? .success : .warning)
-        } catch {
-            status = "Handshake failed: \(error.localizedDescription)"
-            logger.log("Handshake failed: \(error.localizedDescription)", phase: "P1", level: .error)
-            if let recovery = (error as? LockdownError)?.recoverySuggestion {
-                logger.log("Fix: \(recovery)", phase: "P1", level: .warning)
-            }
-            return
-        }
-
-        // Step 2: Tunnel + heartbeat
-        status = "Starting tunnel & heartbeat..."
-        logger.log("Starting lockdownd heartbeat...", phase: "P3")
-
+        let modernRemotePairing = ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26
         let docsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let pairingPath = docsDir.appendingPathComponent("pairing.plist").path
-
         let tunnel = ideviceTunnel ?? IdeviceTunnel()
 
-        let errorMsg: String? = await Task.detached {
-            tunnel.connect(withPairingFile: pairingPath, deviceIP: "10.7.0.1", port: 62078)
-        }.value
+        var legacyLockdown: LockdownClient? = nil
 
-        if let errorMsg = errorMsg {
-            status = "Tunnel failed: \(errorMsg)"
-            logger.log("Connect failed: \(errorMsg)", phase: "P3", level: .error)
-            logger.log("Is DDI mounted? Use StikDebug to mount it first.", phase: "P3", level: .warning)
-            return
+        if modernRemotePairing {
+            status = "Connecting Remote Pairing/RSD..."
+            logger.log("Using iOS 26+/27 Remote Pairing endpoint 10.7.0.1:49152", phase: "P1", level: .info)
+
+            let errorMsg: String? = await Task.detached {
+                tunnel.connect(withPairingFile: pairingPath, deviceIP: "10.7.0.1", port: 49152)
+            }.value
+
+            if let errorMsg {
+                status = "Remote Pairing failed: \(errorMsg)"
+                logger.log("Remote Pairing failed: \(errorMsg)", phase: "P1", level: .error)
+                logger.log("Pairing file must contain RPPairing keys from current iLoader/SideStore.", phase: "P1", level: .warning)
+                return
+            }
+
+            logger.log("Remote Pairing/RSD tunnel established", phase: "P1", level: .success)
+        } else {
+            status = "Connecting lockdown..."
+            logger.log("Using legacy lockdown endpoint 10.7.0.1:62078", phase: "P1", level: .info)
+
+            do {
+                let client = LockdownClient(pairingRecord: record)
+                try client.connect()
+                lockdownClient = client
+                legacyLockdown = client
+                logger.log("TCP connected", phase: "P1", level: .success)
+
+                let type = try client.queryType()
+                logger.log("QueryType: \(type)", phase: "P1", level: .success)
+
+                let sid = try client.startSession()
+                logger.log("Session started (ID: \(sid))", phase: "P1", level: .success)
+            } catch {
+                status = "Handshake failed: \(error.localizedDescription)"
+                logger.log("Handshake failed: \(error.localizedDescription)", phase: "P1", level: .error)
+                return
+            }
+
+            status = "Starting legacy tunnel..."
+            let errorMsg: String? = await Task.detached {
+                tunnel.connect(withPairingFile: pairingPath, deviceIP: "10.7.0.1", port: 62078)
+            }.value
+            if let errorMsg {
+                status = "Tunnel failed: \(errorMsg)"
+                logger.log("Connect failed: \(errorMsg)", phase: "P3", level: .error)
+                return
+            }
         }
 
         ideviceTunnel = tunnel
         tunnelConnected = true
-        logger.log("Lockdownd heartbeat started (marco/polo)", phase: "P3", level: .success)
-        logger.log("Each operation will create a fresh CDTunnel on demand", phase: "P3", level: .info)
+        lastPingOk = true
+        logger.log(modernRemotePairing ? "RPPairing tunnel ready" : "Lockdown tunnel ready",
+                   phase: "P3", level: .success)
 
         BackgroundKeepAlive.shared.start()
         keepAliveActive = BackgroundKeepAlive.shared.isActive
@@ -496,26 +507,16 @@ struct ContentView: View {
         }
 
         startHeartbeat()
-        lastPingOk = true
 
-        // Step 3: Self-runner (DTX + XCTest + automation)
         status = "Starting self-runner..."
         logger.log("Starting self-runner mode...", phase: "RUNNER", level: .info)
 
         do {
-            let lockdown = LockdownClient(pairingRecord: record)
-            try lockdown.connect()
-            logger.log("Lockdown TCP connected (for testmanagerd)", phase: "RUNNER", level: .success)
-
-            let _ = try lockdown.queryType()
-            let sid = try lockdown.startSession()
-            logger.log("Lockdown session: \(sid)", phase: "RUNNER", level: .success)
-
-            let tm = TestManagerClient(lockdown: lockdown, tunnel: ideviceTunnel, logger: logger)
+            let tm = TestManagerClient(lockdown: legacyLockdown, tunnel: ideviceTunnel, logger: logger)
             testManager = tm
 
             let runner = SelfRunner(
-                lockdown: lockdown,
+                lockdown: legacyLockdown,
                 testManager: tm,
                 tunnel: ideviceTunnel,
                 logger: logger
@@ -535,7 +536,6 @@ struct ContentView: View {
             return
         }
 
-        // Step 4: Initial screenshot
         status = "Taking initial screenshot..."
         await takeDeviceScreenshot()
         status = "Ready! Tap screenshot to interact."

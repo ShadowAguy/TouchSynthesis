@@ -4,7 +4,7 @@ import Foundation
 /// Implements the DTX-based RPC protocol to manage XCTest sessions
 /// for touch event synthesis via the self-runner approach.
 class TestManagerClient {
-    let lockdown: LockdownClient
+    let lockdown: LockdownClient?
     let tunnel: IdeviceTunnel?  // Optional: for RSD proxy path
     let logger: ProtocolLogger?
 
@@ -35,7 +35,7 @@ class TestManagerClient {
     private var testBundleReadyContinuation: CheckedContinuation<Void, Error>?
     private var testPlanStartedContinuation: CheckedContinuation<Void, Error>?
 
-    init(lockdown: LockdownClient, tunnel: IdeviceTunnel? = nil, logger: ProtocolLogger? = nil) {
+    init(lockdown: LockdownClient? = nil, tunnel: IdeviceTunnel? = nil, logger: ProtocolLogger? = nil) {
         self.lockdown = lockdown
         self.tunnel = tunnel
         self.logger = logger
@@ -54,24 +54,28 @@ class TestManagerClient {
         var useRSD = false
 
         var lastError: String = ""
-        for serviceName in Self.serviceNames {
-            do {
-                log("Trying lockdown service: \(serviceName)", level: .debug)
-                let (p1, s1) = try lockdown.startService(name: serviceName)
-                servicePort1 = p1
-                serviceSSL1 = s1
-                log("Service started on port \(p1) (SSL: \(s1))", level: .success)
+        if let lockdown {
+            for serviceName in Self.serviceNames {
+                do {
+                    log("Trying lockdown service: \(serviceName)", level: .debug)
+                    let (p1, s1) = try lockdown.startService(name: serviceName)
+                    servicePort1 = p1
+                    serviceSSL1 = s1
+                    log("Service started on port \(p1) (SSL: \(s1))", level: .success)
 
-                let (p2, s2) = try lockdown.startService(name: serviceName)
-                servicePort2 = p2
-                serviceSSL2 = s2
-                log("Second service on port \(p2) (SSL: \(s2))", level: .success)
-                break
-            } catch {
-                lastError = error.localizedDescription
-                log("Service \(serviceName) failed: \(lastError)", level: .warning)
-                continue
+                    let (p2, s2) = try lockdown.startService(name: serviceName)
+                    servicePort2 = p2
+                    serviceSSL2 = s2
+                    log("Second service on port \(p2) (SSL: \(s2))", level: .success)
+                    break
+                } catch {
+                    lastError = error.localizedDescription
+                    log("Service \(serviceName) failed: \(lastError)", level: .warning)
+                    continue
+                }
             }
+        } else {
+            log("Using Remote Pairing/RSD path; skipping legacy lockdown services", level: .info)
         }
 
         // If lockdownd failed, try RSD proxy path
@@ -129,13 +133,16 @@ class TestManagerClient {
         }
 
         // Create DTX connections
-        let host = useRSD ? "127.0.0.1" : lockdown.host
+        guard useRSD || lockdown != nil else {
+            throw TestManagerError.serviceNotAvailable
+        }
+        let host = useRSD ? "127.0.0.1" : lockdown!.host
         conn1 = DTXConnection(
             host: host, port: servicePort1,
-            useTLS: serviceSSL1, pairingRecord: useRSD ? nil : lockdown.pairingRecord)
+            useTLS: serviceSSL1, pairingRecord: useRSD ? nil : lockdown!.pairingRecord)
         conn2 = DTXConnection(
             host: host, port: servicePort2,
-            useTLS: serviceSSL2, pairingRecord: useRSD ? nil : lockdown.pairingRecord)
+            useTLS: serviceSSL2, pairingRecord: useRSD ? nil : lockdown!.pairingRecord)
 
         // Wait a moment for proxy accept threads
         if useRSD {

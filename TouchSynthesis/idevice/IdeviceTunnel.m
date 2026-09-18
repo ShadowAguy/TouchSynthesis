@@ -82,7 +82,24 @@ static int sGlobalHeartbeatToken = 0;
 
     [self disconnect];
 
-    // Start lockdownd heartbeat — this keeps lockdownd alive and DDI mounted
+    // iOS 26.4+/27 uses Remote Pairing on 49152. No legacy lockdown
+    // heartbeat is available on this path; each operation opens a fresh
+    // RPPairing tunnel and RSD handshake.
+    if (port == 49152) {
+        _connected = YES;
+        struct AdapterHandle *adapter = NULL;
+        struct RsdHandshakeHandle *handshake = NULL;
+        NSString *testErr = [self _freshTunnelWithAdapter:&adapter handshake:&handshake];
+        if (testErr != nil) {
+            _connected = NO;
+            return testErr;
+        }
+        if (handshake) rsd_handshake_free(handshake);
+        if (adapter) adapter_free(adapter);
+        return nil;
+    }
+
+    // Legacy lockdownd path (older iOS)
     struct IdevicePairingFile *pairing = NULL;
     IdeviceFfiError *err = idevice_pairing_file_read([pairingFilePath UTF8String], &pairing);
     if (err != NULL) {
@@ -102,7 +119,7 @@ static int sGlobalHeartbeatToken = 0;
 
     err = idevice_tcp_provider_new(
         (struct sockaddr *)&addr,
-        pairing,  // consumed
+        pairing,
         "TouchSynthesis-Heartbeat",
         &_heartbeatProvider
     );
@@ -112,7 +129,6 @@ static int sGlobalHeartbeatToken = 0;
         return msg;
     }
 
-    // Connect to lockdownd heartbeat service
     err = heartbeat_connect(_heartbeatProvider, &_heartbeatClient);
     if (err != NULL) {
         NSString *msg = [NSString stringWithFormat:@"Heartbeat connect failed: %s", err->message];
@@ -122,7 +138,6 @@ static int sGlobalHeartbeatToken = 0;
         return msg;
     }
 
-    // Start marco/polo loop on background thread
     _heartbeatRunning = YES;
     sGlobalHeartbeatToken++;
     _heartbeatToken = sGlobalHeartbeatToken;
@@ -150,21 +165,18 @@ static int sGlobalHeartbeatToken = 0;
             }
 
             interval = newInterval + 5;
-
             hbErr = heartbeat_send_polo(client);
             if (hbErr != NULL) {
                 NSLog(@"[IdeviceTunnel] Heartbeat polo failed: %s", hbErr->message);
                 idevice_error_free(hbErr);
                 break;
             }
-
-            NSLog(@"[IdeviceTunnel] Heartbeat polo (next=%llu)", interval);
         }
 
         NSLog(@"[IdeviceTunnel] Heartbeat thread exiting (token=%d)", myToken);
     });
 
-    return nil; // success
+    return nil;
 }
 
 // MARK: - Fresh CDTunnel helper
@@ -176,6 +188,50 @@ static int sGlobalHeartbeatToken = 0;
                                      handshake:(struct RsdHandshakeHandle **)outHandshake {
     if (!_connected || !_savedPairingPath || !_savedDeviceIP) {
         return @"Not connected — call connect first";
+    }
+
+    // Current iOS path: raw Remote Pairing -> software tunnel -> RSD.
+    if (_savedPort == 49152) {
+        struct RpPairingFileHandle *rpPairing = NULL;
+        IdeviceFfiError *rpErr = rp_pairing_file_read([_savedPairingPath UTF8String], &rpPairing);
+        if (rpErr != NULL) {
+            NSString *msg = [NSString stringWithFormat:@"RPPairing file read: %s", rpErr->message];
+            idevice_error_free(rpErr);
+            return msg;
+        }
+
+        struct sockaddr_in rpAddr;
+        memset(&rpAddr, 0, sizeof(rpAddr));
+        rpAddr.sin_family = AF_INET;
+        rpAddr.sin_port = htons(_savedPort);
+        if (inet_pton(AF_INET, [_savedDeviceIP UTF8String], &rpAddr.sin_addr) != 1) {
+            rp_pairing_file_free(rpPairing);
+            return @"Invalid Remote Pairing IP address";
+        }
+
+        struct AdapterHandle *adapter = NULL;
+        struct RsdHandshakeHandle *handshake = NULL;
+        rpErr = tunnel_create_rppairing(
+            (struct sockaddr *)&rpAddr,
+            (socklen_t)sizeof(rpAddr),
+            "TouchSynthesis",
+            rpPairing,
+            NULL,
+            NULL,
+            &adapter,
+            &handshake
+        );
+        rp_pairing_file_free(rpPairing);
+
+        if (rpErr != NULL) {
+            NSString *msg = [NSString stringWithFormat:@"RPPairing tunnel: %s", rpErr->message];
+            idevice_error_free(rpErr);
+            return msg;
+        }
+
+        *outAdapter = adapter;
+        *outHandshake = handshake;
+        return nil;
     }
 
     // Read pairing file (fresh copy each time)
