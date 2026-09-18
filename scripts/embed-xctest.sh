@@ -122,15 +122,23 @@ echo "Embedded developer payload:"
 du -sh "$DEST"
 find "$DEST" -maxdepth 1 -mindepth 1 -print | sort
 
-# Show unresolved developer-path dependencies. This is diagnostic and fails the build
-# only if a copied binary still directly references /Developer.
+# Validate unresolved /Developer links. Weak load commands are intentionally
+# tolerated by dyld when absent; only unresolved strong dependencies fail CI.
 bad=0
 while IFS= read -r bin; do
   [[ -f "$bin" ]] || continue
   if file "$bin" | grep -q 'Mach-O'; then
-    if otool -L "$bin" | grep -E '[[:space:]]+/(System/)?Developer/' >/dev/null; then
-      echo "ERROR: unresolved Developer dependency in $bin"
-      otool -L "$bin" | grep -E '[[:space:]]+/(System/)?Developer/'
+    deps="$(otool -L "$bin" | grep -E '[[:space:]]+/(System/)?Developer/' || true)"
+    [[ -n "$deps" ]] || continue
+    strong="$(printf '%s\n' "$deps" | grep -v ', weak)' || true)"
+    weak="$(printf '%s\n' "$deps" | grep ', weak)' || true)"
+    if [[ -n "$weak" ]]; then
+      echo "WARN: unresolved weak Developer dependency in $bin"
+      printf '%s\n' "$weak"
+    fi
+    if [[ -n "$strong" ]]; then
+      echo "ERROR: unresolved strong Developer dependency in $bin"
+      printf '%s\n' "$strong"
       bad=1
     fi
   fi
