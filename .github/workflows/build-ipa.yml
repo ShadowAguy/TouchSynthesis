@@ -1,0 +1,77 @@
+name: Build TouchSynthesis IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-ipa.yml"
+      - "TouchSynthesis/**"
+      - "scripts/**"
+      - "vendor/**"
+      - "project.yml"
+      - ".gitmodules"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install XcodeGen and Rust target
+        run: |
+          brew install xcodegen
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup target add aarch64-apple-ios
+
+      - name: Build idevice FFI
+        run: |
+          chmod +x scripts/build-idevice.sh
+          ./scripts/build-idevice.sh
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build unsigned iPhoneOS app
+        run: |
+          rm -rf build
+          xcodebuild             -project TouchSynthesis.xcodeproj             -scheme TouchSynthesis             -configuration Release             -sdk iphoneos             -derivedDataPath "$PWD/build"             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             CODE_SIGN_IDENTITY=""             DEVELOPMENT_TEAM=""             build
+
+      - name: Package unsigned IPA
+        run: |
+          APP="$PWD/build/Build/Products/Release-iphoneos/TouchSynthesis.app"
+          test -d "$APP"
+          rm -rf Payload TouchSynthesis-unsigned.ipa
+          mkdir Payload
+          cp -R "$APP" Payload/
+          /usr/bin/zip -qry TouchSynthesis-unsigned.ipa Payload
+          shasum -a 256 TouchSynthesis-unsigned.ipa | tee TouchSynthesis-unsigned.ipa.sha256
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: TouchSynthesis-unsigned-ipa
+          path: |
+            TouchSynthesis-unsigned.ipa
+            TouchSynthesis-unsigned.ipa.sha256
+          if-no-files-found: error
+          retention-days: 30
